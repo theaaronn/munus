@@ -22,43 +22,34 @@ type model struct {
 
 func main() {
 	var model model
-	files, err := loadTodos(".", "json")
+	err := loadTodos(".", "json", &model)
 	if err != nil {
 		fmt.Printf("at load: %v", err)
+		return
 	}
+	for _, todo := range model.todos {
+		fmt.Println("Title:", todo.Title, "\ndetail:", todo.Body)
+	}
+}
 
-	for _, file := range files {
-		data, err := os.Open(file)
-		if err != nil {
-			fmt.Printf("at open file %v: %v", file, err)
-		}
-		dec := json.NewDecoder(data)
-		for dec.More() {
-			var todo Todo
-			err := dec.Decode(&todo)
+func loadTodos(dir, ext string, model *model) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ext) {
+			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 			if err != nil {
-				fmt.Printf("at decode: %v", err)
-				return
+				return fmt.Errorf("at open file %v: %v", entry, err)
+			}
+			var todo Todo
+			err = json.Unmarshal(data, &todo)
+			if err != nil {
+				return fmt.Errorf("at unmarshalling file %v: %v", entry, err)
 			}
 			model.todos = append(model.todos, todo)
 		}
 	}
-	for _, todo := range  model.todos {
-		fmt.Println(todo.Title, todo.Body)
-	}
+	return nil
 }
-
-func loadTodos(dir, ext string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var files []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ext) {
-			files = append(files, filepath.Join(dir, entry.Name()))
-		}
-	}
-	return files, nil
-}
-
