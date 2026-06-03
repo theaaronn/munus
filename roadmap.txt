@@ -1,0 +1,13 @@
+DONE Store text todos in local files (one json per todo)
+encrypt local file
+config todo's file location
+Integrate rg to look for todos (switch only for todo title or todo description/details)
+Be able to attach and open images and links
+Be able to attach videos and play them
+Get todos from ssh server (git repository) instead of local file
+encrypt todos on the server
+config which server to pull todos from (ssh keys?)
+
+repository - list - todo
+
+
