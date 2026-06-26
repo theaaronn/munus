@@ -21,10 +21,13 @@ const (
 )
 
 type model struct {
-	repo  string
-	level int8
-	mode  int8 // editing text, moving through todos, inserting a file
-	todos []Todo
+	dirs   []string // meant to follow convention <todoListName>_munus
+	dir    string   // current dir
+	repo   string   // repo source of todos
+	level  int8
+	mode   int8 // editing text, moving through todos, inserting a file (future)
+	todos  []Todo
+	cursor int
 }
 
 func (m model) View() tea.View {
@@ -41,25 +44,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
+		case "1":
+			m.cursor = 0
+			m.dir = m.dirs[0]
+			m.changeDir(m.dirs[0])
+		case "2":
+			m.cursor = 0
+			m.dir = m.dirs[1]
+			m.changeDir(m.dirs[1])
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "up", "j":
+			m.cursor = max(0, m.cursor-1)
+		case "down", "k":
+			m.cursor = min(len(m.todos)-1, m.cursor+1)
 		}
 	}
 	return m, nil
 }
 
 func initialModel() (model, error) {
+	dirs, err := loadDirs(".")
+	if err != nil {
+		return model{}, fmt.Errorf("err while loading dirs from . : %v", err)
+	}
 	// + In root directory and json format by default
-	todos, err := loadTodos(".", ".json")
+	todos, err := loadTodos(dirs[0], ".json")
 	if err != nil {
 		return model{}, fmt.Errorf("from initialModel: %v", err)
 	}
 
 	return model{
-		repo:  ".",
-		todos: todos,
-		mode:  modeTodosList,
+		dirs:   dirs,
+		dir:    dirs[0],
+		repo:   ".",
+		todos:  todos,
+		mode:   modeTodosList,
+		cursor: 0,
 	}, nil
+}
+
+// load new todos to m.todos
+func (m *model) changeDir(dir string) error {
+	todos, err := loadTodos(dir, ".json")
+	if err != nil {
+		return err
+	}
+	m.todos = todos
+	return nil
 }
 
 func loadTodos(dir, ext string) ([]Todo, error) {
@@ -74,21 +106,39 @@ func loadTodos(dir, ext string) ([]Todo, error) {
 			if err != nil {
 				return nil, fmt.Errorf("at open file %v: %v", entry, err)
 			}
-			var todo Todo
-			err = json.Unmarshal(data, &todo)
+			err = json.Unmarshal(data, &todos)
 			if err != nil {
 				return nil, fmt.Errorf("at unmarshalling file %v: %v", entry, err)
 			}
-			todos = append(todos, todo)
 		}
 	}
 	return todos, nil
 }
 
+// Loads directories ending with _munus to model.dirs
+func loadDirs(rootDir string) ([]string, error) {
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), "_munus") && entry.IsDir() {
+			dirs = append(dirs, entry.Name())
+		}
+	}
+	return dirs, nil
+}
+
 func printTodos(m model) string {
 	var s strings.Builder
-	for _, todo := range m.todos {
-		s.WriteString(fmt.Sprintln("Title:", todo.Title, "\ndetail:", todo.Body))
+	for idx, todo := range m.todos {
+		if m.cursor == idx {
+			fmt.Fprint(&s, "[>]")
+		} else {
+			fmt.Fprint(&s, "[ ]")
+		}
+		fmt.Fprintln(&s, "Title:", todo.Title, "\ndetail:", todo.Body)
 	}
 	return s.String()
 }
