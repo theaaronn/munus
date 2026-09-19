@@ -47,6 +47,7 @@ type model struct {
 	input         string
 	status        string // last error/info message
 	pendingEdit   bool   // "e" prefix pressed, waiting for t/d
+	pendingAdd    bool   // "a" prefix pressed, waiting for t/l
 	width, height int
 	scroll        int // fullscreen detail scroll offset
 }
@@ -268,6 +269,12 @@ func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.pendingAdd {
+		m.pendingAdd = false
+		m.resolveAdd(msg.String())
+		return m, nil
+	}
+	m.status = ""
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -286,7 +293,6 @@ func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "e":
 		m.pendingEdit = true
-		m.status = "edit: t = title, d = description"
 	case "d":
 		if err := m.deleteTodo(); err != nil {
 			m.status = err.Error()
@@ -298,6 +304,30 @@ func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// resolveAdd handles the a-t / a-l chord after "a" was pressed
+func (m model) resolveAdd(shortcut string) {
+	switch shortcut {
+	case "t":
+		if len(m.dirs) == 0 {
+			m.status = "create a list first (a-l)"
+			return
+		}
+		m.editIdx = -1
+		m.input = ""
+		m.mode = modeTitleInput
+		m.status = ""
+	case "l":
+		m.editIdx = -1
+		m.input = ""
+		m.mode = modeListNameInput
+		m.status = ""
+	case "esc":
+		m.status = "add cancelled"
+	default:
+		m.status = "add: unknown command (t todo, l list, esc cancel)"
+	}
 }
 
 func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -313,6 +343,12 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.pendingAdd {
+		m.pendingAdd = false
+		m.resolveAdd(msg.String())
+		return m, nil
+	}
+	m.status = ""
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -366,17 +402,10 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeFullDetail
 		}
 	case "a":
-		if len(m.dirs) == 0 {
-			m.status = "create a list first (n)"
-			return m, nil
-		}
-		m.editIdx = -1
-		m.input = ""
-		m.mode = modeTitleInput
-		m.status = ""
+		m.pendingAdd = true
+		return m, nil
 	case "e":
 		m.pendingEdit = true
-		m.status = "edit: t = title, d = description"
 		return m, nil
 	case "d":
 		if m.pane == paneTodos && len(m.todos) > 0 {
@@ -386,10 +415,6 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.status = "todo deleted"
 			}
 		}
-	case "n":
-		m.input = ""
-		m.mode = modeListNameInput
-		m.status = ""
 	}
 	return m, nil
 }
@@ -490,10 +515,17 @@ func (m model) footerText() string {
 	case modeListNameInput:
 		fmt.Fprintf(&f, "new list name (creates <name>_munus): %s█", m.input)
 	default:
-		if m.status != "" {
-			fmt.Fprintf(&f, "%s\n", m.status)
+		switch {
+		case m.pendingEdit:
+			f.WriteString("edit: t = title  d = description  esc = cancel")
+		case m.pendingAdd:
+			f.WriteString("add: t = todo  l = list  esc = cancel")
+		default:
+			if m.status != "" {
+				fmt.Fprintf(&f, "%s\n", m.status)
+			}
+			f.WriteString(m.helpLine())
 		}
-		f.WriteString(m.helpLine())
 	}
 	return f.String()
 }
@@ -501,9 +533,9 @@ func (m model) footerText() string {
 func (m model) helpLine() string {
 	switch m.mode {
 	case modeFullDetail:
-		return "←/esc back • e-t title • e-d desc • d delete • j/k browse • q quit"
+		return "←/esc back • e edit • d delete • ↑/↓ browse • q quit"
 	default:
-		return "←/→ panes • enter open • a add • e-t title • e-d desc • d delete • n new list • j/k move • q quit"
+		return "←/→ panes • enter open • a add • e edit • d delete • ↑/↓ move • q quit"
 	}
 }
 
@@ -619,7 +651,7 @@ func (m model) renderColumns() string {
 // listLines returns one line per list
 func (m model) listLines() []string {
 	if len(m.dirs) == 0 {
-		return []string{"(no lists — press n)"}
+		return []string{"(no lists — press a-l)"}
 	}
 	lines := make([]string, len(m.dirs))
 	for idx, dir := range m.dirs {
