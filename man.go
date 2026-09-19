@@ -24,6 +24,7 @@ const (
 	modeTitleInput
 	modeBodyInput
 	modeListNameInput
+	modeListRenameInput
 )
 
 const (
@@ -48,6 +49,7 @@ type model struct {
 	status        string // last error/info message
 	pendingEdit   bool   // "e" prefix pressed, waiting for t/d
 	pendingAdd    bool   // "a" prefix pressed, waiting for t/l
+	editFrom      int8   // mode to return to after add/edit completes
 	width, height int
 	scroll        int // fullscreen detail scroll offset
 }
@@ -201,7 +203,8 @@ func (m *model) submitTodo(title, body string) error {
 		return err
 	}
 	m.editIdx = -1
-	m.mode = modeTodos
+	m.mode = m.editFrom
+	m.editFrom = modeTodos
 	return nil
 }
 
@@ -220,13 +223,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case tea.PasteMsg:
+		switch m.mode {
+		case modeTitleInput, modeBodyInput, modeListNameInput, modeListRenameInput:
+			m.input += msg.String()
+		}
 	case tea.KeyPressMsg:
 		switch m.mode {
 		case modeLists, modeTodos:
 			return m.handleNavKeys(msg)
 		case modeFullDetail:
 			return m.handleFullDetailKeys(msg)
-		case modeTitleInput, modeBodyInput, modeListNameInput:
+		case modeTitleInput, modeBodyInput, modeListNameInput, modeListRenameInput:
 			return m.handleInputKeys(msg)
 		}
 	}
@@ -234,7 +242,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // beginEdit routes the e-t / e-d chords to title or description edit
-func (m model) beginEdit(shortcut string) {
+func (m *model) beginEdit(shortcut string) {
 	if len(m.todos) == 0 {
 		return
 	}
@@ -242,6 +250,7 @@ func (m model) beginEdit(shortcut string) {
 		m.cursor = len(m.todos) - 1
 	}
 	todo := m.todos[m.cursor]
+	m.editFrom = m.mode
 	m.editIdx = m.cursor
 	m.titleInput = todo.Title
 	m.input = ""
@@ -306,8 +315,48 @@ func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// beginRename starts renaming the hovered/opened list
+func (m *model) beginRename() {
+	if len(m.dirs) == 0 {
+		return
+	}
+	m.input = m.dirName()
+	m.titleInput = m.dir
+	m.mode = modeListRenameInput
+	m.status = ""
+}
+
+// renameList renames a list: renames its dir and updates state
+func (m *model) renameList(old, name string) error {
+	if old == "" {
+		return fmt.Errorf("no list to rename")
+	}
+	if name == "" {
+		return fmt.Errorf("list name cannot be empty")
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return fmt.Errorf("list name cannot contain slashes")
+	}
+	newDir := name + "_munus"
+	if newDir == old {
+		return nil
+	}
+	if err := os.Rename(old, newDir); err != nil {
+		return fmt.Errorf("at renaming %v to %v: %v", old, newDir, err)
+	}
+	for i, dir := range m.dirs {
+		if dir == old {
+			m.dirs[i] = newDir
+			break
+		}
+	}
+	m.dir = newDir
+	return nil
+}
+
 // resolveAdd handles the a-t / a-l chord after "a" was pressed
-func (m model) resolveAdd(shortcut string) {
+func (m *model) resolveAdd(shortcut string) {
+	m.editFrom = m.mode
 	switch shortcut {
 	case "t":
 		if len(m.dirs) == 0 {
@@ -405,7 +454,12 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pendingAdd = true
 		return m, nil
 	case "e":
-		m.pendingEdit = true
+		if m.pane == paneLists {
+			m.editIdx = -1
+			m.beginRename()
+		} else {
+			m.pendingEdit = true
+		}
 		return m, nil
 	case "d":
 		if m.pane == paneTodos && len(m.todos) > 0 {
@@ -424,12 +478,21 @@ func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "Q":
 		return m, tea.Quit
 	case "esc":
-		m.mode = modeTodos
+		m.mode = m.editFrom
+		m.editFrom = modeTodos
 		m.editIdx = -1
 		m.input = ""
 	case "enter":
 		text := m.input
 		switch m.mode {
+		case modeListRenameInput:
+			if err := m.renameList(m.titleInput, text); err != nil {
+				m.status = err.Error()
+				return m, nil
+			}
+			m.input = ""
+			m.mode = modeTodos
+			m.status = "list renamed"
 		case modeListNameInput:
 			if err := m.createList(text); err != nil {
 				m.status = err.Error()
@@ -445,6 +508,14 @@ func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.input = ""
+			if m.editIdx >= 0 {
+				// edit chord: title only, keep existing description
+				if err := m.submitTodo(text, m.todos[m.editIdx].Body); err != nil {
+					m.status = err.Error()
+					return m, nil
+				}
+				return m, nil
+			}
 			m.titleInput = text
 			m.mode = modeBodyInput
 		case modeBodyInput:
@@ -453,12 +524,16 @@ func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.status = err.Error()
 				return m, nil
 			}
-			m.mode = modeTodos
+			m.editFrom = modeTodos
 			m.status = ""
 		}
 	case "backspace":
 		if runes := []rune(m.input); len(runes) > 0 {
 			m.input = string(runes[:len(runes)-1])
+		}
+	case "ctrl+enter", "ctrl+j":
+		if m.mode == modeBodyInput {
+			m.input += "\n"
 		}
 	case "ctrl+c":
 		return m, tea.Quit
@@ -479,7 +554,7 @@ func (m model) render() string {
 	}
 	b.WriteString("\n")
 
-	if m.mode == modeFullDetail {
+	if m.mode == modeFullDetail || (m.editFrom == modeFullDetail && m.mode >= modeTitleInput) {
 		b.WriteString(m.renderFullDetail())
 	} else {
 		b.WriteString(m.renderColumns())
@@ -511,9 +586,12 @@ func (m model) footerText() string {
 			fmt.Fprintf(&f, "new todo — title: %s█", m.input)
 		}
 	case modeBodyInput:
-		fmt.Fprintf(&f, "description: %s█", m.input)
+		fmt.Fprintf(&f, "description (enter = save, ctrl+enter = newline, esc = cancel):\n%s█", m.input)
 	case modeListNameInput:
 		fmt.Fprintf(&f, "new list name (creates <name>_munus): %s█", m.input)
+	case modeListRenameInput:
+		fmt.Fprintf(&f, "rename list: %s█", m.input)
+		return f.String()
 	default:
 		switch {
 		case m.pendingEdit:
@@ -623,7 +701,7 @@ func (m model) renderColumns() string {
 	if m.pane == paneTodos && m.dir != "" {
 		leftHdr, rightHdr = "todos", "detail"
 		leftLines = m.todoLines(true)
-		rightLines = m.detailLines()
+		rightLines = m.detailLines(rightW)
 	} else {
 		leftHdr, rightHdr = "lists", "todos"
 		leftLines = m.listLines()
@@ -699,15 +777,16 @@ func (m model) todoLines(showTitles bool) []string {
 	return lines
 }
 
-// detailLines renders the currently selected todo in the detail column
-func (m model) detailLines() []string {
+// detailLines renders the currently selected todo in the detail column,
+// wrapped to the column width
+func (m model) detailLines(width int) []string {
 	if len(m.todos) == 0 {
 		return []string{"(no todos)"}
 	}
 	if m.cursor >= len(m.todos) {
 		m.cursor = len(m.todos) - 1
 	}
-	return m.fullDetailLines(1<<30, 1<<30)
+	return m.fullDetailLines(width, 1<<30)
 }
 
 // boxLines pads/truncates each line to width (first line is the header)
