@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type Todo struct {
@@ -42,8 +44,9 @@ type model struct {
 	listCursor    int    // cursor within dirs
 	editIdx       int    // todo index being edited, -1 for new
 	titleInput    string // pending todo title
-	input         strings.Builder
+	input         string
 	status        string // last error/info message
+	pendingEdit   bool   // "e" prefix pressed, waiting for t/d
 	width, height int
 	scroll        int // fullscreen detail scroll offset
 }
@@ -229,7 +232,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// beginEdit routes the e-t / e-d chords to title or description edit
+func (m model) beginEdit(shortcut string) {
+	if len(m.todos) == 0 {
+		return
+	}
+	if m.cursor >= len(m.todos) {
+		m.cursor = len(m.todos) - 1
+	}
+	todo := m.todos[m.cursor]
+	m.editIdx = m.cursor
+	m.titleInput = todo.Title
+	m.input = ""
+	m.status = ""
+	switch shortcut {
+	case "t":
+		m.input = todo.Title
+		m.mode = modeTitleInput
+	case "d":
+		m.input = todo.Body
+		m.mode = modeBodyInput
+	}
+}
+
 func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.pendingEdit {
+		m.pendingEdit = false
+		switch msg.String() {
+		case "t", "d":
+			m.beginEdit(msg.String())
+		case "esc":
+			m.status = "edit cancelled"
+		default:
+			m.status = "edit: unknown command (e-t title, e-d description, esc cancel)"
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -247,19 +285,8 @@ func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.scroll++
 		}
 	case "e":
-		if len(m.todos) == 0 {
-			return m, nil
-		}
-		if m.cursor >= len(m.todos) {
-			m.cursor = len(m.todos) - 1
-		}
-		todo := m.todos[m.cursor]
-		m.editIdx = m.cursor
-		m.titleInput = todo.Title
-		m.input.Reset()
-		m.input.WriteString(todo.Body)
-		m.mode = modeBodyInput
-		m.status = ""
+		m.pendingEdit = true
+		m.status = "edit: t = title, d = description"
 	case "d":
 		if err := m.deleteTodo(); err != nil {
 			m.status = err.Error()
@@ -274,6 +301,18 @@ func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.pendingEdit {
+		m.pendingEdit = false
+		switch msg.String() {
+		case "t", "d":
+			m.beginEdit(msg.String())
+		case "esc":
+			m.status = "edit cancelled"
+		default:
+			m.status = "edit: unknown command (e-t title, e-d description, esc cancel)"
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -332,17 +371,13 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.editIdx = -1
-		m.input.Reset()
+		m.input = ""
 		m.mode = modeTitleInput
 		m.status = ""
 	case "e":
-		if m.pane != paneTodos || len(m.todos) == 0 {
-			return m, nil
-		}
-		m.editIdx = m.cursor
-		m.input.Reset()
-		m.mode = modeTitleInput
-		m.status = ""
+		m.pendingEdit = true
+		m.status = "edit: t = title, d = description"
+		return m, nil
 	case "d":
 		if m.pane == paneTodos && len(m.todos) > 0 {
 			if err := m.deleteTodo(); err != nil {
@@ -352,7 +387,7 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "n":
-		m.input.Reset()
+		m.input = ""
 		m.mode = modeListNameInput
 		m.status = ""
 	}
@@ -361,19 +396,21 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "Q":
+		return m, tea.Quit
 	case "esc":
 		m.mode = modeTodos
 		m.editIdx = -1
-		m.input.Reset()
+		m.input = ""
 	case "enter":
-		text := m.input.String()
+		text := m.input
 		switch m.mode {
 		case modeListNameInput:
 			if err := m.createList(text); err != nil {
 				m.status = err.Error()
 				return m, nil
 			}
-			m.input.Reset()
+			m.input = ""
 			m.mode = modeTodos
 			m.status = "list created"
 			m.pane = paneTodos
@@ -382,11 +419,11 @@ func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.status = "title cannot be empty"
 				return m, nil
 			}
-			m.input.Reset()
+			m.input = ""
 			m.titleInput = text
 			m.mode = modeBodyInput
 		case modeBodyInput:
-			m.input.Reset()
+			m.input = ""
 			if err := m.submitTodo(m.titleInput, text); err != nil {
 				m.status = err.Error()
 				return m, nil
@@ -395,15 +432,13 @@ func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.status = ""
 		}
 	case "backspace":
-		s := m.input.String()
-		if runes := []rune(s); len(runes) > 0 {
-			m.input.Reset()
-			m.input.WriteString(string(runes[:len(runes)-1]))
+		if runes := []rune(m.input); len(runes) > 0 {
+			m.input = string(runes[:len(runes)-1])
 		}
 	case "ctrl+c":
 		return m, tea.Quit
 	default:
-		m.input.WriteString(msg.Text)
+		m.input += msg.Text
 	}
 	return m, nil
 }
@@ -446,14 +481,14 @@ func (m model) footerText() string {
 	switch m.mode {
 	case modeTitleInput:
 		if m.editIdx >= 0 {
-			fmt.Fprintf(&f, "edit title: %s█", m.input.String())
+			fmt.Fprintf(&f, "edit title: %s█", m.input)
 		} else {
-			fmt.Fprintf(&f, "new todo — title: %s█", m.input.String())
+			fmt.Fprintf(&f, "new todo — title: %s█", m.input)
 		}
 	case modeBodyInput:
-		fmt.Fprintf(&f, "description: %s█", m.input.String())
+		fmt.Fprintf(&f, "description: %s█", m.input)
 	case modeListNameInput:
-		fmt.Fprintf(&f, "new list name (creates <name>_munus): %s█", m.input.String())
+		fmt.Fprintf(&f, "new list name (creates <name>_munus): %s█", m.input)
 	default:
 		if m.status != "" {
 			fmt.Fprintf(&f, "%s\n", m.status)
@@ -466,9 +501,9 @@ func (m model) footerText() string {
 func (m model) helpLine() string {
 	switch m.mode {
 	case modeFullDetail:
-		return "esc back • e edit • d delete • j/k browse • q quit"
+		return "←/esc back • e-t title • e-d desc • d delete • j/k browse • q quit"
 	default:
-		return "←/→ panes • enter open • a add • e edit • d delete • n new list • j/k move • q quit"
+		return "←/→ panes • enter open • a add • e-t title • e-d desc • d delete • n new list • j/k move • q quit"
 	}
 }
 
@@ -484,11 +519,15 @@ func (m model) fullDetailLines(width, viewport int) []string {
 	todo := m.todos[m.cursor]
 
 	var lines []string
-	hdr := fmt.Sprintf("title: %s", todo.Title)
-	if width > 7 {
-		hdr = "title: " + wrapText(todo.Title, width-7)[0]
+	// emphasized title: bold + reverse video + underline bar, reads larger
+	// than the body in the detail view
+	title := wrapText(todo.Title, width)
+	lines = append(lines, styleTitle(title[0]))
+	lines = append(lines, titleBar(len([]rune(stripAnsi(title[0])))))
+	if len(title) > 1 {
+		lines = append(lines, "")
+		lines = append(lines, title[1:]...)
 	}
-	lines = append(lines, hdr)
 	if todo.Body != "" {
 		lines = append(lines, "")
 		lines = append(lines, wrapText(todo.Body, width)...)
@@ -584,13 +623,14 @@ func (m model) listLines() []string {
 	}
 	lines := make([]string, len(m.dirs))
 	for idx, dir := range m.dirs {
-		marker := "  "
+		text := strings.TrimSuffix(dir, "_munus")
 		if m.pane == paneLists && m.listCursor == idx {
-			marker = "> "
+			lines[idx] = "  " + hoverStyle.Render(text)
 		} else if m.dir == dir {
-			marker = "* "
+			lines[idx] = "* " + text
+		} else {
+			lines[idx] = "  " + text
 		}
-		lines[idx] = marker + strings.TrimSuffix(dir, "_munus")
 	}
 	return lines
 }
@@ -606,21 +646,22 @@ func (m model) todoLines(showTitles bool) []string {
 	lines := make([]string, len(m.todos))
 	for idx, todo := range m.todos {
 		if showTitles {
-			marker := "  "
-			if m.cursor == idx {
-				marker = "> "
-			}
 			preview := todo.Body
-			lines[idx] = marker + todo.Title
+			line := todo.Title
 			if preview != "" {
-				lines[idx] += "  — " + preview
+				line += "  — " + preview
+			}
+			if m.cursor == idx {
+				lines[idx] = "  " + hoverStyle.Render(line)
+			} else {
+				lines[idx] = "  " + line
 			}
 		} else {
-			marker := "  "
 			if m.pane == paneTodos && m.cursor == idx {
-				marker = "> "
+				lines[idx] = "  " + hoverStyle.Render(todo.Title)
+			} else {
+				lines[idx] = "  " + todo.Title
 			}
-			lines[idx] = marker + todo.Title
 		}
 	}
 	return lines
@@ -634,14 +675,7 @@ func (m model) detailLines() []string {
 	if m.cursor >= len(m.todos) {
 		m.cursor = len(m.todos) - 1
 	}
-	todo := m.todos[m.cursor]
-	lines := []string{fmt.Sprintf("title: %s", todo.Title)}
-	if todo.Body != "" {
-		lines = append(lines, "", todo.Body)
-	} else {
-		lines = append(lines, "", "(no description)")
-	}
-	return lines
+	return m.fullDetailLines(1<<30, 1<<30)
 }
 
 // boxLines pads/truncates each line to width (first line is the header)
@@ -654,22 +688,74 @@ func boxLines(lines []string, width int) []string {
 }
 
 func pad(s string, w int) string {
-	l := len([]rune(s))
+	l := visualWidth(s)
 	if l >= w {
 		return s
 	}
 	return s + strings.Repeat(" ", w-l)
 }
 
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+func stripAnsi(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
+}
+
+func visualWidth(s string) int {
+	return len([]rune(stripAnsi(s)))
+}
+
+// truncate shortens s to width, ANSI escape codes don't count towards width
 func truncate(s string, w int) string {
-	rs := []rune(s)
-	if len(rs) <= w {
+	if visualWidth(s) <= w {
 		return s
 	}
-	if w <= 1 {
-		return string(rs[:1])
+	var out strings.Builder
+	width := 0
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '\x1b' {
+			// copy escape sequence without counting width
+			for runes[i] != 'm' {
+				out.WriteRune(runes[i])
+				i++
+			}
+			out.WriteRune('m')
+			continue
+		}
+		if width >= w-1 {
+			out.WriteString("…")
+			out.WriteString("\x1b[0m")
+			return out.String()
+		}
+		out.WriteRune(runes[i])
+		width++
 	}
-	return string(rs[:w-1]) + "…"
+	return out.String()
+}
+
+// titleBar renders an underline bar for the emphasized todo title
+func titleBar(w int) string {
+	if w <= 0 {
+		return ""
+	}
+	return "─" + strings.Repeat("─", max(0, w-1))
+}
+
+// titleStyle renders the todo title: bold, #ebb58c text color
+var titleStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.Color("#ebb58c"))
+
+// hoverStyle highlights the hovered item in the menu columns
+var hoverStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#1c1c1c")).
+	Background(lipgloss.Color("#ebb58c"))
+
+// styleTitle renders the todo title with color emphasis so it reads
+// larger than the content in the detail view
+func styleTitle(s string) string {
+	return titleStyle.Render(s)
 }
 
 // wrapText wraps each source line at width, breaking on spaces
