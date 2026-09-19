@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -45,7 +47,8 @@ type model struct {
 	listCursor    int    // cursor within dirs
 	editIdx       int    // todo index being edited, -1 for new
 	titleInput    string // pending todo title
-	input         string
+	titleField    textinput.Model
+	bodyField     textarea.Model
 	status        string // last error/info message
 	pendingEdit   bool   // "e" prefix pressed, waiting for t/d
 	pendingAdd    bool   // "a" prefix pressed, waiting for t/l
@@ -69,12 +72,23 @@ func initialModel() (model, error) {
 	if err != nil {
 		return model{}, fmt.Errorf("err while loading dirs from . : %v", err)
 	}
+	titleField := textinput.New()
+	titleField.Prompt = ""
+
+	bodyField := textarea.New()
+	bodyField.Prompt = ""
+	bodyField.ShowLineNumbers = false
+	bodyField.DynamicHeight = true
+	bodyField.MaxHeight = 20
+
 	m := model{
-		dirs:    dirs,
-		repo:    ".",
-		pane:    paneLists,
-		mode:    modeLists,
-		editIdx: -1,
+		dirs:       dirs,
+		repo:       ".",
+		pane:       paneLists,
+		mode:       modeLists,
+		editIdx:    -1,
+		titleField: titleField,
+		bodyField:  bodyField,
 	}
 	if len(dirs) > 0 {
 		if err := m.loadList(0); err != nil {
@@ -223,10 +237,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.mode == modeBodyInput {
+			m.fitBodyEdit()
+		}
 	case tea.PasteMsg:
 		switch m.mode {
-		case modeTitleInput, modeBodyInput, modeListNameInput, modeListRenameInput:
-			m.input += msg.String()
+		case modeTitleInput, modeListNameInput, modeListRenameInput:
+			updated, cmd := m.titleField.Update(msg)
+			m.titleField = updated
+			return m, cmd
+		case modeBodyInput:
+			updated, cmd := m.bodyField.Update(msg)
+			m.bodyField = updated
+			return m, cmd
 		}
 	case tea.KeyPressMsg:
 		switch m.mode {
@@ -253,16 +276,64 @@ func (m *model) beginEdit(shortcut string) {
 	m.editFrom = m.mode
 	m.editIdx = m.cursor
 	m.titleInput = todo.Title
-	m.input = ""
 	m.status = ""
 	switch shortcut {
 	case "t":
-		m.input = todo.Title
+		m.titleField.Reset()
+		m.titleField.SetValue(todo.Title)
+		m.titleField.Focus()
 		m.mode = modeTitleInput
 	case "d":
-		m.input = todo.Body
-		m.mode = modeBodyInput
+		m.startBodyEdit(todo.Body)
 	}
+}
+
+// startBodyEdit primes the inline textarea for the todo body
+func (m *model) startBodyEdit(body string) {
+	m.bodyField.Reset()
+	m.bodyField.SetValue(body)
+	m.bodyField.Focus()
+	m.mode = modeBodyInput
+	m.fitBodyEdit()
+}
+
+// fitBodyEdit sizes the textarea to the current view
+func (m *model) fitBodyEdit() {
+	if m.editFrom == modeFullDetail || m.mode == modeFullDetail {
+		// fullscreen: leave room for headers, title block, footer
+		availW := max(20, m.width-2)
+		total := m.editViewportLines(availW)
+		m.bodyField.SetWidth(availW)
+		m.bodyField.MaxHeight = max(2, total)
+		m.bodyField.SetHeight(max(2, total))
+	} else {
+		total := m.width
+		if total <= 0 {
+			total = 80
+		}
+		leftW := max(16, total/3)
+		rightW := max(10, total-leftW-2)
+		m.bodyField.SetWidth(rightW)
+		m.bodyField.MaxHeight = 6
+		m.bodyField.SetHeight(6)
+	}
+}
+
+// editViewportLines returns the number of lines left for a body editor
+// of the given width when editing in fullscreen, after subtracting
+// headers, footer and the title block
+func (m model) editViewportLines(width int) int {
+	total := m.height
+	if total <= 0 {
+		total = 24
+	}
+	// top header(2) + footer(1) + gap line before editor(1) + bar(1)
+	overhead := 5
+	if len(m.todos) > 0 {
+		idx := min(m.cursor, len(m.todos)-1)
+		overhead += max(1, len(wrapText(m.todos[idx].Title, width)))
+	}
+	return max(2, total-overhead)
 }
 
 func (m model) handleFullDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -320,8 +391,10 @@ func (m *model) beginRename() {
 	if len(m.dirs) == 0 {
 		return
 	}
-	m.input = m.dirName()
 	m.titleInput = m.dir
+	m.titleField.Reset()
+	m.titleField.SetValue(m.dirName())
+	m.titleField.Focus()
 	m.mode = modeListRenameInput
 	m.status = ""
 }
@@ -364,12 +437,14 @@ func (m *model) resolveAdd(shortcut string) {
 			return
 		}
 		m.editIdx = -1
-		m.input = ""
+		m.titleField.Reset()
+		m.titleField.Focus()
 		m.mode = modeTitleInput
 		m.status = ""
 	case "l":
 		m.editIdx = -1
-		m.input = ""
+		m.titleField.Reset()
+		m.titleField.Focus()
 		m.mode = modeListNameInput
 		m.status = ""
 	case "esc":
@@ -474,40 +549,48 @@ func (m model) handleNavKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "Q":
-		return m, tea.Quit
-	case "esc":
-		m.mode = m.editFrom
-		m.editFrom = modeTodos
-		m.editIdx = -1
-		m.input = ""
-	case "enter":
-		text := m.input
-		switch m.mode {
-		case modeListRenameInput:
-			if err := m.renameList(m.titleInput, text); err != nil {
-				m.status = err.Error()
+	switch m.mode {
+	case modeListRenameInput, modeListNameInput, modeTitleInput:
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m.titleField.Blur()
+			m.editIdx = -1
+			m.mode = m.editFrom
+			m.editFrom = modeTodos
+			return m, nil
+		case "enter":
+			text := m.titleField.Value()
+			if m.mode == modeListRenameInput {
+				if err := m.renameList(m.titleInput, text); err != nil {
+					m.status = err.Error()
+					return m, nil
+				}
+				m.titleField.Blur()
+				m.mode = modeTodos
+				m.status = "list renamed"
+				m.editFrom = modeTodos
 				return m, nil
 			}
-			m.input = ""
-			m.mode = modeTodos
-			m.status = "list renamed"
-		case modeListNameInput:
-			if err := m.createList(text); err != nil {
-				m.status = err.Error()
+			if m.mode == modeListNameInput {
+				if err := m.createList(text); err != nil {
+					m.status = err.Error()
+					return m, nil
+				}
+				m.titleField.Blur()
+				m.mode = modeTodos
+				m.status = "list created"
+				m.pane = paneTodos
+				m.editFrom = modeTodos
 				return m, nil
 			}
-			m.input = ""
-			m.mode = modeTodos
-			m.status = "list created"
-			m.pane = paneTodos
-		case modeTitleInput:
 			if text == "" {
 				m.status = "title cannot be empty"
 				return m, nil
 			}
-			m.input = ""
+			m.titleField.Blur()
 			if m.editIdx >= 0 {
 				// edit chord: title only, keep existing description
 				if err := m.submitTodo(text, m.todos[m.editIdx].Body); err != nil {
@@ -517,28 +600,33 @@ func (m model) handleInputKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.titleInput = text
-			m.mode = modeBodyInput
-		case modeBodyInput:
-			m.input = ""
-			if err := m.submitTodo(m.titleInput, text); err != nil {
+			m.startBodyEdit("")
+		}
+		updated, cmd := m.titleField.Update(msg)
+		m.titleField = updated
+		return m, cmd
+	case modeBodyInput:
+		switch msg.String() {
+		case "esc":
+			m.bodyField.Blur()
+			m.editIdx = -1
+			m.mode = m.editFrom
+			m.editFrom = modeTodos
+			return m, nil
+		case "ctrl+c":
+			return m, tea.Quit
+		case "ctrl+s":
+			if err := m.submitTodo(m.titleInput, m.bodyField.Value()); err != nil {
 				m.status = err.Error()
 				return m, nil
 			}
-			m.editFrom = modeTodos
+			m.bodyField.Blur()
 			m.status = ""
+			return m, nil
 		}
-	case "backspace":
-		if runes := []rune(m.input); len(runes) > 0 {
-			m.input = string(runes[:len(runes)-1])
-		}
-	case "ctrl+enter", "ctrl+j":
-		if m.mode == modeBodyInput {
-			m.input += "\n"
-		}
-	case "ctrl+c":
-		return m, tea.Quit
-	default:
-		m.input += msg.Text
+		updated, cmd := m.bodyField.Update(msg)
+		m.bodyField = updated
+		return m, cmd
 	}
 	return m, nil
 }
@@ -578,26 +666,19 @@ func (m model) render() string {
 // footerText builds the bottom bar prompt, status or controls
 func (m model) footerText() string {
 	var f strings.Builder
-	switch m.mode {
-	case modeTitleInput:
-		if m.editIdx >= 0 {
-			fmt.Fprintf(&f, "edit title: %s█", m.input)
-		} else {
-			fmt.Fprintf(&f, "new todo — title: %s█", m.input)
-		}
-	case modeBodyInput:
-		fmt.Fprintf(&f, "description (enter = save, ctrl+enter = newline, esc = cancel):\n%s█", m.input)
-	case modeListNameInput:
-		fmt.Fprintf(&f, "new list name (creates <name>_munus): %s█", m.input)
-	case modeListRenameInput:
-		fmt.Fprintf(&f, "rename list: %s█", m.input)
-		return f.String()
+	switch {
+	case m.pendingEdit:
+		f.WriteString("edit: t = title  d = description  esc = cancel")
+	case m.pendingAdd:
+		f.WriteString("add: t = todo  l = list  esc = cancel")
 	default:
-		switch {
-		case m.pendingEdit:
-			f.WriteString("edit: t = title  d = description  esc = cancel")
-		case m.pendingAdd:
-			f.WriteString("add: t = todo  l = list  esc = cancel")
+		switch m.mode {
+		case modeTitleInput:
+			f.WriteString("title: enter = next • esc = cancel")
+		case modeBodyInput:
+			f.WriteString("description: ctrl+s = save • esc = cancel")
+		case modeListNameInput, modeListRenameInput:
+			f.WriteString("list name: enter = confirm • esc = cancel")
 		default:
 			if m.status != "" {
 				fmt.Fprintf(&f, "%s\n", m.status)
@@ -629,16 +710,23 @@ func (m model) fullDetailLines(width, viewport int) []string {
 	todo := m.todos[m.cursor]
 
 	var lines []string
-	// emphasized title: bold + reverse video + underline bar, reads larger
-	// than the body in the detail view
+	// emphasized title: bold + colored text reads larger than the body,
+	// replaced inline by the live input while it is being edited
 	title := wrapText(todo.Title, width)
-	lines = append(lines, styleTitle(title[0]))
-	lines = append(lines, titleBar(len([]rune(stripAnsi(title[0])))))
-	if len(title) > 1 {
-		lines = append(lines, "")
-		lines = append(lines, title[1:]...)
+	if m.mode == modeTitleInput && m.editIdx >= 0 {
+		lines = append(lines, hoverStyle.Render(m.titleField.View()))
+	} else {
+		lines = append(lines, styleTitle(title[0]))
+		lines = append(lines, titleBar(len([]rune(stripAnsi(title[0])))))
+		if len(title) > 1 {
+			lines = append(lines, "")
+			lines = append(lines, title[1:]...)
+		}
 	}
-	if todo.Body != "" {
+	if m.mode == modeBodyInput {
+		lines = append(lines, "")
+		lines = append(lines, strings.Split(m.bodyField.View(), "\n")...)
+	} else if todo.Body != "" {
 		lines = append(lines, "")
 		lines = append(lines, wrapText(todo.Body, width)...)
 	} else {
@@ -734,13 +822,21 @@ func (m model) listLines() []string {
 	lines := make([]string, len(m.dirs))
 	for idx, dir := range m.dirs {
 		text := strings.TrimSuffix(dir, "_munus")
-		if m.pane == paneLists && m.listCursor == idx {
+		if m.mode == modeListRenameInput && m.titleInput == dir {
+			continue
+		} else if m.pane == paneLists && m.listCursor == idx {
 			lines[idx] = "  " + hoverStyle.Render(text)
 		} else if m.dir == dir {
 			lines[idx] = "* " + text
 		} else {
 			lines[idx] = "  " + text
 		}
+	}
+	switch m.mode {
+	case modeListRenameInput:
+		lines = append(lines, "  "+m.titleField.View())
+	case modeListNameInput:
+		lines = append(lines, "  "+m.titleField.View())
 	}
 	return lines
 }
